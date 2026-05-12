@@ -43,9 +43,9 @@ def _system_blocks(content: str) -> list[dict]:
     ]
 
 
-async def summarize(content: str) -> str:
+async def summarize(content: str, *, model: str | None = None) -> str:
     response = await _client.messages.create(
-        model=MODEL,
+        model=model or MODEL,
         max_tokens=600,
         system=_system_blocks(content),
         messages=[{"role": "user", "content": "Write a 3-5 sentence summary of this content."}],

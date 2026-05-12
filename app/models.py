@@ -33,6 +33,10 @@ class Entry(BaseModel):
     attached_image_filename: str = ""  # filename under data/images/ if user dropped a screenshot
     content_source: Literal["auto", "paste", "image"] = "auto"
 
+    # Bulk-import provenance — distinguishes live entries from historical backfill
+    backfilled: bool = False
+    source_post_date: str = ""  # date header from the original biweekly post, e.g. "3/18/26"
+
     chat_history: list[ChatTurn] = Field(default_factory=list)
 
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

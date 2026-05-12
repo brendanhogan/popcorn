@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>popcorn — wiki</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/wiki.css" />
+  </head>
+  <body class="wiki-body">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="topbar-left">
+          <h1>popcorn</h1>
+          <span class="session-label">/</span>
+          <a href="/wiki/index" class="wiki-home-link">wiki</a>
+        </div>
+        <div class="topbar-actions">
+          <span id="wiki-counts" class="hint"></span>
+          <button id="wiki-rebuild" class="btn btn-ghost">Rebuild</button>
+          <a href="/" class="btn btn-ghost">← Entries</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="wiki-layout">
+      <aside class="wiki-sidebar">
+        <div class="wiki-side-section">
+          <input type="search" id="wiki-search" placeholder="Filter…" />
+        </div>
+
+        <div class="wiki-side-section">
+          <h2 class="wiki-side-title">Concepts</h2>
+          <ul id="wiki-concept-list" class="wiki-list"></ul>
+        </div>
+
+        <div class="wiki-side-section">
+          <h2 class="wiki-side-title">Sources</h2>
+          <ul id="wiki-source-list" class="wiki-list"></ul>
+        </div>
+      </aside>
+
+      <article id="wiki-article" class="wiki-article">
+        <div class="wiki-empty">Loading…</div>
+      </article>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/wiki.js"></script>
+  </body>
+</html>

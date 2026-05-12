@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -22,6 +23,7 @@ from .models import (
     SessionCreate,
     SessionRename,
 )
+from . import wiki as wiki_mod
 from .storage import (
     IMAGES_DIR,
     add_entry_to_session,
@@ -328,6 +330,118 @@ async def open_session_route(session_id: str) -> dict:
         raise HTTPException(404)
     set_current_session_id(session_id)
     return _session_summary(s)
+
+
+# ---------- wiki ----------
+
+
+@app.get("/wiki")
+@app.get("/wiki/{path:path}")
+async def wiki_view(path: str = "") -> FileResponse:
+    return FileResponse(STATIC / "wiki.html")
+
+
+@app.get("/api/wiki/index")
+async def wiki_index() -> dict:
+    pages = wiki_mod.list_pages()
+    concepts: list[dict] = []
+    for slug in pages["concepts"]:
+        text = wiki_mod.read_page("concepts", slug) or ""
+        title = wiki_mod.page_title(text, fallback=slug)
+        source_count = len(wiki_mod.WIKI_LINK_RE.findall(text)) - 1  # rough: subtract self-link if any
+        # better: count "Sources (N)" header
+        m = re.search(r"## Sources \((\d+)\)", text)
+        if m:
+            source_count = int(m.group(1))
+        concepts.append({"slug": slug, "title": title, "source_count": source_count})
+    concepts.sort(key=lambda c: -c["source_count"])
+
+    sources: list[dict] = []
+    for slug in pages["sources"]:
+        text = wiki_mod.read_page("sources", slug) or ""
+        title = wiki_mod.page_title(text, fallback=slug)
+        date_match = re.search(r"\*\*First seen:\*\*\s*(\S+)", text)
+        rating_match = re.search(r"\*\*Rating:\*\*\s*(\S+)", text)
+        sources.append({
+            "slug": slug,
+            "title": title,
+            "date": date_match.group(1) if date_match else "",
+            "rating_str": rating_match.group(1) if rating_match else "",
+        })
+    sources.sort(key=lambda s: s["date"], reverse=True)
+
+    has_index = (wiki_mod.INDEX_PATH).exists()
+    return {
+        "has_index": has_index,
+        "concepts": concepts,
+        "sources": sources,
+        "counts": {
+            "concepts": len(pages["concepts"]),
+            "sources": len(pages["sources"]),
+        },
+    }
+
+
+@app.get("/api/wiki/page")
+async def wiki_page(path: str) -> dict:
+    resolved = wiki_mod.resolve_fq(path)
+    if resolved is None:
+        raise HTTPException(404, f"unknown page path: {path}")
+    kind, slug = resolved
+    text = wiki_mod.read_page(kind, slug)
+    if text is None:
+        raise HTTPException(404, f"page not found: {path}")
+    title = wiki_mod.page_title(text, fallback=slug or kind)
+    html = wiki_mod.render_to_html(text)
+    backlinks_raw = wiki_mod.find_backlinks(path)
+    backlinks = []
+    for bk_kind, bk_slug in backlinks_raw:
+        bk_text = wiki_mod.read_page(bk_kind, bk_slug) or ""
+        bk_title = wiki_mod.page_title(bk_text, fallback=bk_slug or bk_kind)
+        backlinks.append({
+            "path": wiki_mod.fq_slug(bk_kind, bk_slug),
+            "title": bk_title,
+            "kind": bk_kind,
+        })
+    return {
+        "path": path,
+        "kind": kind,
+        "title": title,
+        "html": html,
+        "markdown": text,
+        "backlinks": backlinks,
+    }
+
+
+_wiki_build_state = {"running": False, "started_at": "", "last_finished_at": "", "last_error": ""}
+
+
+@app.post("/api/wiki/build")
+async def wiki_build() -> dict:
+    if _wiki_build_state["running"]:
+        return {"status": "already_running", **_wiki_build_state}
+
+    async def runner():
+        from datetime import datetime, timezone
+        from .build_wiki import build
+        _wiki_build_state["running"] = True
+        _wiki_build_state["started_at"] = datetime.now(timezone.utc).isoformat()
+        _wiki_build_state["last_error"] = ""
+        try:
+            await build(no_llm=False, target_count=20)
+        except Exception as e:
+            _wiki_build_state["last_error"] = f"{type(e).__name__}: {e}"
+        finally:
+            _wiki_build_state["running"] = False
+            _wiki_build_state["last_finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    asyncio.create_task(runner())
+    return {"status": "started", **_wiki_build_state}
+
+
+@app.get("/api/wiki/build/status")
+async def wiki_build_status() -> dict:
+    return dict(_wiki_build_state)
 
 
 @app.get("/api/export/text", response_class=PlainTextResponse)
