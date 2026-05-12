@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>popcorn — reading list intake</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="topbar-left">
+          <h1>popcorn</h1>
+          <span class="session-label">·</span>
+          <button id="session-name" class="session-name" title="Click to rename">Untitled</button>
+        </div>
+        <div class="topbar-actions">
+          <div class="dropdown" id="open-dropdown">
+            <button id="open-session" class="btn btn-ghost">Open ▾</button>
+            <div class="dropdown-menu hidden" id="sessions-menu"></div>
+          </div>
+          <button id="new-session" class="btn btn-ghost" title="Start a new session">
+            New
+          </button>
+          <button id="save-session" class="btn btn-ghost" title="Rename / save current session">
+            Save as…
+          </button>
+          <span class="topbar-divider"></span>
+          <button id="export-text" class="btn btn-ghost" title="Copy plain text to clipboard">
+            Copy text
+          </button>
+          <button id="export-json" class="btn btn-ghost" title="Download JSON">
+            Download JSON
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="paste-area">
+        <textarea
+          id="urls-input"
+          placeholder="Paste links here, one per line. Hit Submit to ingest. Twitter/X links are not fetched — just listed."
+          rows="6"
+        ></textarea>
+        <div class="paste-actions">
+          <button id="submit-batch" class="btn btn-primary">Submit</button>
+          <span id="paste-hint" class="hint"></span>
+        </div>
+      </section>
+
+      <section id="entries" class="entries"></section>
+
+      <div id="empty-state" class="empty-state hidden">
+        <p>No entries yet. Paste links above and click Submit.</p>
+      </div>
+    </main>
+
+    <template id="entry-template">
+      <article class="entry" data-status="pending">
+        <header class="entry-header">
+          <div class="entry-status">
+            <span class="status-dot"></span>
+            <span class="status-label">pending</span>
+          </div>
+          <a class="entry-url" target="_blank" rel="noopener"></a>
+          <select class="entry-type">
+            <option value="paper">paper</option>
+            <option value="twitter">twitter</option>
+            <option value="other">other</option>
+          </select>
+        </header>
+
+        <div class="entry-body">
+          <div class="entry-main">
+            <details class="entry-content">
+              <summary>Extracted text</summary>
+              <pre class="extracted"></pre>
+            </details>
+
+            <div class="entry-summary">
+              <label class="field-label">Summary</label>
+              <div class="summary-text"></div>
+            </div>
+
+            <details class="entry-paste">
+              <summary>Paste content (text or screenshot)</summary>
+              <div class="paste-body">
+                <div class="paste-drop">
+                  <p>
+                    <strong>Drop an image, paste with ⌘V, or click to upload.</strong><br />
+                    <span class="paste-hint-text">Claude will read the text from it.</span>
+                  </p>
+                  <input type="file" accept="image/*" class="paste-file" hidden />
+                </div>
+                <div class="paste-thumb hidden">
+                  <img alt="attached screenshot" />
+                </div>
+                <textarea
+                  class="paste-text"
+                  rows="6"
+                  placeholder="...or paste/edit the text content here directly"
+                ></textarea>
+                <div class="paste-actions">
+                  <button type="button" class="btn btn-primary paste-process">Process content</button>
+                  <span class="paste-status hint"></span>
+                </div>
+              </div>
+            </details>
+
+            <div class="entry-meta">
+              <div class="field title-field">
+                <label class="field-label">Title</label>
+                <input type="text" class="title-input" placeholder="(LLM will suggest)" />
+                <div class="title-suggestions"></div>
+              </div>
+
+              <div class="field-row">
+                <div class="field rating-field">
+                  <label class="field-label">Rating</label>
+                  <div class="rating-buttons">
+                    <button type="button" class="rating-btn" data-rating="1">🍿</button>
+                    <button type="button" class="rating-btn" data-rating="2">🍿🍿</button>
+                    <button type="button" class="rating-btn" data-rating="3">🍿🍿🍿</button>
+                    <button type="button" class="rating-btn" data-rating="4">🍿🍿🍿🍿</button>
+                    <button type="button" class="rating-btn rating-clear" data-rating="0">none</button>
+                  </div>
+                </div>
+
+                <div class="field private-field">
+                  <label class="checkbox-label">
+                    <input type="checkbox" class="private-input" />
+                    <span>Private (exclude from public export)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="field">
+                <label class="field-label">Notes</label>
+                <textarea class="notes-input" rows="3" placeholder="Your description / notes"></textarea>
+              </div>
+            </div>
+
+            <details class="entry-chat">
+              <summary>Chat with this content</summary>
+              <div class="chat-history"></div>
+              <form class="chat-form">
+                <input type="text" class="chat-input" placeholder="Ask a follow-up question..." />
+                <button type="submit" class="btn btn-ghost">Send</button>
+              </form>
+            </details>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
