@@ -37,16 +37,37 @@ http://localhost:8765/wiki     →  browse a Claude-synthesized wiki of your cor
 
 **Wiki** (`/wiki`)
 
-- One auto-generated **source page** per entry, with the title, rating,
-  link, your notes, the Claude summary, and links to every concept the
-  entry belongs to.
-- 15–25 auto-generated **concept pages**, each a synthesis of a recurring
-  theme across your corpus. The synthesis quotes *your actual notes* —
-  the wiki ends up describing your interests in your own voice, not as
-  a neutral summary.
-- Cross-linked `[[wiki-links]]` with automatic backlinks.
-- Click **Rebuild** in the topbar to regenerate after a new batch — ~30s,
-  ~$0.30.
+Five article types, all auto-generated, all cross-linked with automatic
+backlinks:
+
+- **Source pages** — one per entry (title, rating, link, your notes, the
+  Claude summary, every concept it belongs to).
+- **Concept pages** — 15–25 recurring themes across your corpus,
+  synthesized with quotes from *your actual notes*. The wiki describes
+  your interests in your voice, not as neutral summaries.
+- **Meta articles** — 4–6 cross-cutting *worldviews* tying clusters of
+  concepts together. Built by clustering the concept embeddings, then
+  asking Claude to name and synthesize the thesis underneath each cluster.
+  Things like *"LLMs as substrates for simulated minds and societies"* or
+  *"Modular, compositional intelligence over monolithic scale."*
+- **Entity pages** — people, labs, companies, products, papers mentioned
+  in 3+ entries. Each page tracks everything you've said about that entity.
+- **Batch recaps** — one auto-generated journal-style recap per past
+  session ("Persona simulation clicks; Claude Code life deepens further").
+
+**Map** (`/wiki/map`)
+
+- 2D t-SNE projection of every entry + concept centroid.
+- Points sized by rating (🍿), colored by date (cream→terracotta for
+  time-drift).
+- Hover for title, click to open the entry/concept page.
+- **Click empty space** → Claude reads the nearest entries and proposes
+  2–3 specific papers/posts/ideas that would naturally live in that empty
+  patch of idea-space. The "what's missing from your reading" inverse.
+
+Click **Rebuild** in the topbar to regenerate after a new batch
+(concepts + meta + entities + batch recaps + embeddings + projection).
+~60s, ~$0.50.
 
 ---
 
@@ -150,11 +171,16 @@ data/
 ├── images/{id}.{ext}          # attached screenshots
 ├── sessions/{slug}.json       # session = name + list of entry IDs
 ├── current.txt                # slug of the active session
+├── embeddings.npz             # local sentence-transformers vectors (entries + concepts)
+├── projection.json            # t-SNE 2D coords cached for the map view
 └── wiki/
     ├── index.md
     ├── log.md
     ├── sources/{slug}.md      # auto-generated, one per entry
-    └── concepts/{slug}.md     # Claude-synthesized themes
+    ├── concepts/{slug}.md     # Claude-synthesized themes
+    ├── meta/{slug}.md         # cross-cutting meta-syntheses
+    ├── entities/{slug}.md     # people, labs, products, papers
+    └── batches/{slug}.md      # per-session journal-style recaps
 ```
 
 **Data flow:**
@@ -200,7 +226,9 @@ Real numbers, not estimates. Anthropic pricing as of model release:
 | Vision OCR on a screenshot             | Sonnet 4.6      | ~$0.01 / image       |
 | Chat with a page (per turn)            | Sonnet 4.6      | <$0.01 / turn        |
 | Bulk import (Haiku, summary only)      | Haiku 4.5       | ~$0.005 / entry      |
-| Wiki rebuild (one big concept call)    | Sonnet 4.6      | ~$0.30 / 170 entries |
+| Wiki rebuild (concepts + meta + entities + batches) | Sonnet 4.6 | ~$0.50 / 170 entries |
+| Embeddings + 2D projection             | Local (CPU)     | $0 (sentence-transformers + sklearn) |
+| Idea discovery click                   | Sonnet 4.6      | ~$0.01 / click       |
 
 For a heavy user (~30 entries/week + a wiki rebuild every two weeks):
 roughly $2–5/month.

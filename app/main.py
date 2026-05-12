@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import os
 import re
 from pathlib import Path
 
@@ -344,20 +345,55 @@ async def wiki_view(path: str = "") -> FileResponse:
 @app.get("/api/wiki/index")
 async def wiki_index() -> dict:
     pages = wiki_mod.list_pages()
+
+    def _read_count(kind: str, slug: str, header: str) -> int:
+        text = wiki_mod.read_page(kind, slug) or ""
+        m = re.search(rf"## {header} \((\d+)\)", text)
+        return int(m.group(1)) if m else 0
+
     concepts: list[dict] = []
-    for slug in pages["concepts"]:
+    for slug in pages.get("concepts", []):
         text = wiki_mod.read_page("concepts", slug) or ""
         title = wiki_mod.page_title(text, fallback=slug)
-        source_count = len(wiki_mod.WIKI_LINK_RE.findall(text)) - 1  # rough: subtract self-link if any
-        # better: count "Sources (N)" header
-        m = re.search(r"## Sources \((\d+)\)", text)
-        if m:
-            source_count = int(m.group(1))
-        concepts.append({"slug": slug, "title": title, "source_count": source_count})
+        concepts.append({"slug": slug, "title": title, "source_count": _read_count("concepts", slug, "Sources")})
     concepts.sort(key=lambda c: -c["source_count"])
 
+    metas: list[dict] = []
+    for slug in pages.get("meta", []):
+        text = wiki_mod.read_page("meta", slug) or ""
+        title = wiki_mod.page_title(text, fallback=slug)
+        n = len(re.findall(r"\[\[concepts/", text))
+        metas.append({"slug": slug, "title": title, "concept_count": n})
+    metas.sort(key=lambda m: -m["concept_count"])
+
+    entities: list[dict] = []
+    for slug in pages.get("entities", []):
+        text = wiki_mod.read_page("entities", slug) or ""
+        title = wiki_mod.page_title(text, fallback=slug)
+        kind_match = re.search(r"^\*([a-z]+)", text, re.MULTILINE)
+        entities.append({
+            "slug": slug,
+            "title": title,
+            "kind": kind_match.group(1) if kind_match else "",
+            "mentions": _read_count("entities", slug, "Mentions"),
+        })
+    entities.sort(key=lambda e: -e["mentions"])
+
+    batches: list[dict] = []
+    for slug in pages.get("batches", []):
+        text = wiki_mod.read_page("batches", slug) or ""
+        title = wiki_mod.page_title(text, fallback=slug)
+        # headline is the *italic* line right after the title
+        head_match = re.search(r"^\*([^*]+)\*\s*$", text, re.MULTILINE)
+        batches.append({
+            "slug": slug,
+            "title": title,
+            "headline": head_match.group(1) if head_match else "",
+            "entry_count": _read_count("batches", slug, "Entries"),
+        })
+
     sources: list[dict] = []
-    for slug in pages["sources"]:
+    for slug in pages.get("sources", []):
         text = wiki_mod.read_page("sources", slug) or ""
         title = wiki_mod.page_title(text, fallback=slug)
         date_match = re.search(r"\*\*First seen:\*\*\s*(\S+)", text)
@@ -370,15 +406,14 @@ async def wiki_index() -> dict:
         })
     sources.sort(key=lambda s: s["date"], reverse=True)
 
-    has_index = (wiki_mod.INDEX_PATH).exists()
     return {
-        "has_index": has_index,
+        "has_index": wiki_mod.INDEX_PATH.exists(),
         "concepts": concepts,
+        "metas": metas,
+        "entities": entities,
+        "batches": batches,
         "sources": sources,
-        "counts": {
-            "concepts": len(pages["concepts"]),
-            "sources": len(pages["sources"]),
-        },
+        "counts": {kind: len(pages.get(kind, [])) for kind in ("sources", "concepts", "meta", "entities", "batches")},
     }
 
 
@@ -414,6 +449,120 @@ async def wiki_page(path: str) -> dict:
 
 
 _wiki_build_state = {"running": False, "started_at": "", "last_finished_at": "", "last_error": ""}
+
+
+@app.get("/api/wiki/map")
+async def wiki_map() -> dict:
+    from .projection import load_or_build_projection
+    return load_or_build_projection()
+
+
+class IdeaQuery(BaseModel):
+    x: float
+    y: float
+    k: int = 6
+
+
+@app.post("/api/wiki/ideas")
+async def wiki_ideas(q: IdeaQuery) -> dict:
+    from .projection import load_or_build_projection
+    proj = load_or_build_projection()
+    points = proj.get("points", [])
+    if not points:
+        raise HTTPException(400, "no projection available; build the wiki first")
+
+    # K nearest entries to (q.x, q.y) by 2D distance
+    entries = [p for p in points if p["kind"] == "entry"]
+    concepts = [p for p in points if p["kind"] == "concept"]
+
+    def dist(p) -> float:
+        dx, dy = p["x"] - q.x, p["y"] - q.y
+        return (dx * dx + dy * dy) ** 0.5
+
+    nearest_entries = sorted(entries, key=dist)[: q.k]
+    nearest_concepts = sorted(concepts, key=dist)[:3]
+
+    # Build context for Claude
+    entry_blocks = []
+    for p in nearest_entries:
+        entry = load_entry(p["id"])
+        if entry is None:
+            continue
+        rating = "🍿" * entry.rating if entry.rating else "?"
+        block = f"- [{rating}] {entry.title or '(untitled)'}"
+        if entry.notes:
+            block += f"\n  note: {entry.notes[:300]}"
+        entry_blocks.append(block)
+
+    concept_lines = [f"- {p['title']}" for p in nearest_concepts]
+
+    prompt = f"""A researcher has a 2D map of their personal reading list, projected from
+text embeddings of each entry. They clicked an empty spot on the map at approximately
+(x={q.x:.2f}, y={q.y:.2f}). The {len(entry_blocks)} entries nearest that click in
+2D space are:
+
+{chr(10).join(entry_blocks)}
+
+The {len(concept_lines)} nearest concept centroids are:
+
+{chr(10).join(concept_lines)}
+
+Your task: propose 2-3 specific *ideas, papers, blog posts, or tweets* that would
+naturally sit at this empty point — things that share the surrounding territory but
+that the user hasn't added yet. Be specific (real or plausible-sounding titles, with
+real authors/groups when relevant). Each idea should clearly fit between the nearby
+entries.
+
+For each idea, return:
+- **title**: a short concrete title (could be a paper title, post title, or tweet hook)
+- **why**: 1-2 sentences explaining why it fits this empty point given the neighbors
+- **search_query**: a short Google-able query the user can run to find it (or
+  something close to it)
+
+Output via the JSON schema."""
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "ideas": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "why": {"type": "string"},
+                        "search_query": {"type": "string"},
+                    },
+                    "required": ["title", "why", "search_query"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["ideas"],
+        "additionalProperties": False,
+    }
+
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic()
+    try:
+        response = await client.messages.create(
+            model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+        )
+        text = next((b.text for b in response.content if b.type == "text"), "")
+        import json as _json
+        data = _json.loads(text)
+        ideas = data.get("ideas", [])[:3]
+    except Exception as e:
+        raise HTTPException(500, f"idea generation failed: {e}")
+
+    return {
+        "ideas": ideas,
+        "nearest": [{"id": p["id"], "title": p.get("title", ""), "kind": p["kind"]} for p in nearest_entries[:5]],
+        "click": {"x": q.x, "y": q.y},
+    }
 
 
 @app.post("/api/wiki/build")

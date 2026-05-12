@@ -57,53 +57,73 @@ async function loadIndex() {
 }
 
 function renderCounts() {
-  const { counts } = state.index || { counts: { concepts: 0, sources: 0 } };
-  $("#wiki-counts").textContent = `${counts.concepts} concepts · ${counts.sources} sources`;
+  const { counts } = state.index || { counts: {} };
+  const parts = [];
+  if (counts.meta) parts.push(`${counts.meta} meta`);
+  if (counts.concepts) parts.push(`${counts.concepts} concepts`);
+  if (counts.entities) parts.push(`${counts.entities} entities`);
+  if (counts.batches) parts.push(`${counts.batches} batches`);
+  if (counts.sources) parts.push(`${counts.sources} sources`);
+  $("#wiki-counts").textContent = parts.join(" · ");
+}
+
+function _renderList(listEl, items, makePath, makeMeta) {
+  const current = currentPath();
+  listEl.innerHTML = "";
+  items.forEach((item) => {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    const path = makePath(item);
+    a.href = `/wiki/${path}`;
+    a.dataset.path = path;
+    const title = document.createElement("span");
+    title.textContent = item.title;
+    a.appendChild(title);
+    if (makeMeta) {
+      const meta = document.createElement("span");
+      meta.className = "item-meta";
+      meta.textContent = makeMeta(item);
+      a.appendChild(meta);
+    }
+    if (current === path) a.classList.add("current");
+    a.addEventListener("click", interceptLink);
+    li.appendChild(a);
+    listEl.appendChild(li);
+  });
 }
 
 function renderSidebar() {
   if (!state.index) return;
-  const current = currentPath();
-
-  const conceptList = $("#wiki-concept-list");
-  conceptList.innerHTML = "";
-  state.index.concepts.forEach((c) => {
-    const li = document.createElement("li");
-    const a = document.createElement("a");
-    a.href = `/wiki/concepts/${c.slug}`;
-    a.dataset.path = `concepts/${c.slug}`;
-    const title = document.createElement("span");
-    title.textContent = c.title;
-    const meta = document.createElement("span");
-    meta.className = "item-meta";
-    meta.textContent = String(c.source_count);
-    a.appendChild(title);
-    a.appendChild(meta);
-    if (current === `concepts/${c.slug}`) a.classList.add("current");
-    a.addEventListener("click", interceptLink);
-    li.appendChild(a);
-    conceptList.appendChild(li);
-  });
-
-  const sourceList = $("#wiki-source-list");
-  sourceList.innerHTML = "";
-  state.index.sources.forEach((s) => {
-    const li = document.createElement("li");
-    const a = document.createElement("a");
-    a.href = `/wiki/sources/${s.slug}`;
-    a.dataset.path = `sources/${s.slug}`;
-    const title = document.createElement("span");
-    title.textContent = s.title;
-    const meta = document.createElement("span");
-    meta.className = "item-meta";
-    meta.textContent = s.date || "";
-    a.appendChild(title);
-    a.appendChild(meta);
-    if (current === `sources/${s.slug}`) a.classList.add("current");
-    a.addEventListener("click", interceptLink);
-    li.appendChild(a);
-    sourceList.appendChild(li);
-  });
+  _renderList(
+    $("#wiki-meta-list"),
+    state.index.metas || [],
+    (m) => `meta/${m.slug}`,
+    (m) => `${m.concept_count}`,
+  );
+  _renderList(
+    $("#wiki-concept-list"),
+    state.index.concepts || [],
+    (c) => `concepts/${c.slug}`,
+    (c) => `${c.source_count}`,
+  );
+  _renderList(
+    $("#wiki-entity-list"),
+    state.index.entities || [],
+    (e) => `entities/${e.slug}`,
+    (e) => `${e.mentions}`,
+  );
+  _renderList(
+    $("#wiki-batch-list"),
+    state.index.batches || [],
+    (b) => `batches/${b.slug}`,
+    null,
+  );
+  _renderList(
+    $("#wiki-source-list"),
+    state.index.sources || [],
+    (s) => `sources/${s.slug}`,
+    (s) => s.date || "",
+  );
 }
 
 function applyFilter(query) {
@@ -120,6 +140,13 @@ function applyFilter(query) {
 
 async function loadPage(path) {
   const article = $("#wiki-article");
+
+  if (path === "map") {
+    await renderMap(article);
+    $$(".wiki-list a").forEach((a) => a.classList.remove("current"));
+    return;
+  }
+
   article.innerHTML = '<div class="wiki-empty">Loading…</div>';
 
   try {
@@ -169,6 +196,254 @@ function interceptLink(e) {
   if (!path) return;
   e.preventDefault();
   navigate(path, true);
+}
+
+// ---------- map ----------
+
+const MAP_VIEWBOX = 220; // viewBox is -110..110 with padding
+const MAP_PAD = 8;
+const RATING_RADIUS = [3, 4, 5, 7, 9, 11]; // index = rating
+const CONCEPT_RADIUS = 7;
+
+function dateToOrdinal(d) {
+  // "3/18/26" -> sortable number, "2/25/26" < "3/18/26"
+  if (!d) return 0;
+  const m = d.match(/^(\d+)\/(\d+)\/(\d+)$/);
+  if (!m) return 0;
+  const yy = parseInt(m[3], 10) + 2000;
+  return yy * 10000 + parseInt(m[1], 10) * 100 + parseInt(m[2], 10);
+}
+
+function lerpColor(t) {
+  // t in [0, 1] -> cream to terracotta
+  // cream rgb(233, 220, 198), terracotta rgb(179, 90, 35)
+  const cream = [233, 220, 198];
+  const terra = [179, 90, 35];
+  const r = Math.round(cream[0] + (terra[0] - cream[0]) * t);
+  const g = Math.round(cream[1] + (terra[1] - cream[1]) * t);
+  const b = Math.round(cream[2] + (terra[2] - cream[2]) * t);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+async function renderMap(container) {
+  document.title = "Map — popcorn wiki";
+  container.innerHTML = `
+    <div class="wiki-map-wrap">
+      <div class="wiki-map-header">
+        <h1>Map</h1>
+        <div class="legend">
+          <span>older</span>
+          <span class="legend-gradient"></span>
+          <span>newer</span>
+          <span>· size = rating · click points to open · click empty space for ideas</span>
+        </div>
+      </div>
+      <div class="wiki-map-controls">
+        <label><input type="checkbox" id="map-toggle-concepts" checked> Show concept labels</label>
+        <label><input type="checkbox" id="map-toggle-time" checked> Color by date</label>
+      </div>
+      <div class="wiki-map-svg-wrap" id="map-svg-wrap">
+        <div class="wiki-empty">Computing projection…</div>
+      </div>
+      <div id="idea-panel"></div>
+    </div>
+  `;
+
+  let data;
+  try {
+    data = await api("/api/wiki/map");
+  } catch (err) {
+    $("#map-svg-wrap").innerHTML = `<div class="wiki-empty">Failed to load: ${err.message}</div>`;
+    return;
+  }
+  if (!data.points || data.points.length === 0) {
+    $("#map-svg-wrap").innerHTML = '<div class="wiki-empty">No projection data. Build the wiki first.</div>';
+    return;
+  }
+
+  drawMap(data);
+
+  $("#map-toggle-concepts").addEventListener("change", () => drawMap(data));
+  $("#map-toggle-time").addEventListener("change", () => drawMap(data));
+}
+
+function drawMap(data) {
+  const showConcepts = $("#map-toggle-concepts").checked;
+  const colorByTime = $("#map-toggle-time").checked;
+
+  const entries = data.points.filter((p) => p.kind === "entry");
+  const concepts = data.points.filter((p) => p.kind === "concept");
+
+  // Date range for color mapping
+  const ordinals = entries.map((p) => dateToOrdinal(p.date)).filter((o) => o > 0);
+  const minD = Math.min(...ordinals);
+  const maxD = Math.max(...ordinals);
+
+  const xy = (p) => [
+    (p.x + 1) * (MAP_VIEWBOX / 2 - MAP_PAD) + MAP_PAD,
+    (p.y + 1) * (MAP_VIEWBOX / 2 - MAP_PAD) + MAP_PAD,
+  ];
+
+  const svgParts = [
+    `<svg viewBox="0 0 ${MAP_VIEWBOX} ${MAP_VIEWBOX}" xmlns="http://www.w3.org/2000/svg" id="map-svg">`,
+    `<rect x="0" y="0" width="${MAP_VIEWBOX}" height="${MAP_VIEWBOX}" fill="transparent" id="map-bg"/>`,
+  ];
+
+  // Entries
+  for (const p of entries) {
+    const [cx, cy] = xy(p);
+    const r = RATING_RADIUS[Math.min(p.rating || 0, 5)] || RATING_RADIUS[0];
+    let fill = "#9aa";
+    if (colorByTime && minD < maxD) {
+      const t = (dateToOrdinal(p.date) - minD) / (maxD - minD);
+      fill = lerpColor(t);
+    } else if (!colorByTime) {
+      fill = p.rating >= 3 ? "#b35a23" : "#c8aa8a";
+    }
+    const stroke = p.private ? "#a13d2f" : "#1f1d17";
+    svgParts.push(
+      `<circle class="map-point map-point-entry" cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${r}" ` +
+      `fill="${fill}" stroke="${stroke}" stroke-width="0.5" stroke-opacity="0.4" ` +
+      `data-kind="entry" data-slug="${escapeAttr(p.slug)}" data-title="${escapeAttr(p.title)}" ` +
+      `data-date="${escapeAttr(p.date)}" data-rating="${p.rating}" data-type="${escapeAttr(p.type)}"/>`
+    );
+  }
+
+  // Concept centroids
+  for (const p of concepts) {
+    const [cx, cy] = xy(p);
+    svgParts.push(
+      `<circle class="map-point map-point-concept" cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${CONCEPT_RADIUS}" ` +
+      `data-kind="concept" data-slug="${escapeAttr(p.slug)}" data-title="${escapeAttr(p.title)}"/>`
+    );
+    if (showConcepts) {
+      svgParts.push(
+        `<text class="map-concept-label" x="${cx.toFixed(2)}" y="${(cy + CONCEPT_RADIUS + 7).toFixed(2)}">${escapeText(p.title)}</text>`
+      );
+    }
+  }
+
+  svgParts.push("</svg>");
+  svgParts.push('<div class="map-tooltip" id="map-tooltip"></div>');
+
+  $("#map-svg-wrap").innerHTML = svgParts.join("");
+
+  // Bind interactions
+  const svg = $("#map-svg");
+  const tooltip = $("#map-tooltip");
+  const wrap = $("#map-svg-wrap");
+
+  $$(".map-point", svg).forEach((pt) => {
+    pt.addEventListener("mouseenter", (e) => {
+      const title = pt.dataset.title;
+      const kind = pt.dataset.kind;
+      let meta = "";
+      if (kind === "entry") {
+        const rating = "🍿".repeat(parseInt(pt.dataset.rating || "0"));
+        meta = `${rating} · ${pt.dataset.date} · ${pt.dataset.type}`;
+      } else {
+        meta = "concept";
+      }
+      tooltip.innerHTML =
+        `<div class="tooltip-title">${escapeText(title)}</div>` +
+        `<div class="tooltip-meta">${escapeText(meta)}</div>`;
+      tooltip.classList.add("visible");
+      positionTooltip(tooltip, e, wrap);
+    });
+    pt.addEventListener("mousemove", (e) => positionTooltip(tooltip, e, wrap));
+    pt.addEventListener("mouseleave", () => tooltip.classList.remove("visible"));
+    pt.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const kind = pt.dataset.kind;
+      const slug = pt.dataset.slug;
+      if (!slug) return;
+      navigate(`${kind === "entry" ? "sources" : "concepts"}/${slug}`, true);
+    });
+  });
+
+  // Click empty space → idea discovery
+  svg.addEventListener("click", (e) => {
+    if (e.target.tagName !== "rect" && !e.target.classList.contains("map-point") &&
+        e.target.tagName !== "svg") {
+      return;
+    }
+    if (e.target.classList.contains("map-point")) return;
+    const rect = svg.getBoundingClientRect();
+    const svgX = ((e.clientX - rect.left) / rect.width) * MAP_VIEWBOX;
+    const svgY = ((e.clientY - rect.top) / rect.height) * MAP_VIEWBOX;
+    // Convert back to projection coords
+    const px = (svgX - MAP_PAD) / (MAP_VIEWBOX / 2 - MAP_PAD) - 1;
+    const py = (svgY - MAP_PAD) / (MAP_VIEWBOX / 2 - MAP_PAD) - 1;
+    requestIdeas(px, py, svgX, svgY);
+  });
+}
+
+function positionTooltip(tooltip, e, wrap) {
+  const rect = wrap.getBoundingClientRect();
+  const x = e.clientX - rect.left + 14;
+  const y = e.clientY - rect.top + 8;
+  tooltip.style.left = `${x}px`;
+  tooltip.style.top = `${y}px`;
+}
+
+function escapeText(s) {
+  return String(s || "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+function escapeAttr(s) {
+  return escapeText(s);
+}
+
+async function requestIdeas(px, py, screenX, screenY) {
+  const panel = $("#idea-panel");
+  panel.innerHTML = `
+    <div class="idea-panel">
+      <h3>Ideas for this empty patch</h3>
+      <div class="idea-meta">click at (${px.toFixed(2)}, ${py.toFixed(2)})</div>
+      <div class="idea-loading">Asking Claude…</div>
+    </div>
+  `;
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+  try {
+    const res = await fetch("/api/wiki/ideas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x: px, y: py, k: 6 }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    renderIdeas(data, px, py);
+  } catch (err) {
+    panel.innerHTML = `<div class="idea-panel"><h3>Ideas for this empty patch</h3>
+      <div class="idea-loading">Failed: ${err.message}</div></div>`;
+  }
+}
+
+function renderIdeas(data, px, py) {
+  const panel = $("#idea-panel");
+  const ideas = data.ideas || [];
+  const nearestTitles = (data.nearest || []).map((n) => n.title).slice(0, 5).join(" · ");
+
+  let html = `<div class="idea-panel">
+    <h3>Ideas for this empty patch</h3>
+    <div class="idea-meta">click at (${px.toFixed(2)}, ${py.toFixed(2)}) · nearest: ${escapeText(nearestTitles)}</div>`;
+
+  if (ideas.length === 0) {
+    html += `<div class="idea-loading">Claude returned no suggestions.</div>`;
+  } else {
+    for (const idea of ideas) {
+      const q = encodeURIComponent(idea.search_query || idea.title || "");
+      html += `<div class="idea-suggestion">
+        <div class="idea-title">${escapeText(idea.title || "")}</div>
+        <div class="idea-why">${escapeText(idea.why || "")}</div>
+        ${q ? `<a class="idea-search" href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">search →</a>` : ""}
+      </div>`;
+    }
+  }
+  html += `</div>`;
+  panel.innerHTML = html;
 }
 
 // ---------- rebuild ----------

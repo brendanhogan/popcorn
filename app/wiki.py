@@ -25,15 +25,27 @@ from .storage import DATA_DIR
 WIKI_DIR = DATA_DIR / "wiki"
 SOURCES_DIR = WIKI_DIR / "sources"
 CONCEPTS_DIR = WIKI_DIR / "concepts"
+META_DIR = WIKI_DIR / "meta"
+ENTITIES_DIR = WIKI_DIR / "entities"
+BATCHES_DIR = WIKI_DIR / "batches"
 INDEX_PATH = WIKI_DIR / "index.md"
 LOG_PATH = WIKI_DIR / "log.md"
 
 WIKI_LINK_RE = re.compile(r"\[\[([^\[\]\|]+)(?:\|([^\[\]]+))?\]\]")
 
 
+_KIND_DIRS: dict[str, Path] = {
+    "sources": SOURCES_DIR,
+    "concepts": CONCEPTS_DIR,
+    "meta": META_DIR,
+    "entities": ENTITIES_DIR,
+    "batches": BATCHES_DIR,
+}
+
+
 def ensure_dirs() -> None:
-    SOURCES_DIR.mkdir(parents=True, exist_ok=True)
-    CONCEPTS_DIR.mkdir(parents=True, exist_ok=True)
+    for d in _KIND_DIRS.values():
+        d.mkdir(parents=True, exist_ok=True)
 
 
 def slugify(text: str, *, max_len: int = 80) -> str:
@@ -50,15 +62,13 @@ def slugify(text: str, *, max_len: int = 80) -> str:
 # ---------- page paths and routing ----------
 
 def page_path(kind: str, slug: str) -> Path:
-    """kind: 'sources' | 'concepts' | 'index' | 'log'"""
+    """kind: any of 'index', 'log', 'sources', 'concepts', 'meta', 'entities', 'batches'."""
     if kind == "index":
         return INDEX_PATH
     if kind == "log":
         return LOG_PATH
-    if kind == "sources":
-        return SOURCES_DIR / f"{slug}.md"
-    if kind == "concepts":
-        return CONCEPTS_DIR / f"{slug}.md"
+    if kind in _KIND_DIRS:
+        return _KIND_DIRS[kind] / f"{slug}.md"
     raise ValueError(f"unknown page kind: {kind}")
 
 
@@ -75,7 +85,7 @@ def resolve_fq(fq: str) -> tuple[str, str] | None:
         return (fq, "")
     if "/" in fq:
         kind, slug = fq.split("/", 1)
-        if kind in ("sources", "concepts"):
+        if kind in _KIND_DIRS:
             return (kind, slug)
     return None
 
@@ -83,12 +93,9 @@ def resolve_fq(fq: str) -> tuple[str, str] | None:
 # ---------- reading ----------
 
 def list_pages() -> dict[str, list[str]]:
-    """Returns {'sources': [slugs], 'concepts': [slugs]}."""
+    """Returns a dict mapping kind → sorted slugs."""
     ensure_dirs()
-    return {
-        "sources": sorted(p.stem for p in SOURCES_DIR.glob("*.md")),
-        "concepts": sorted(p.stem for p in CONCEPTS_DIR.glob("*.md")),
-    }
+    return {kind: sorted(p.stem for p in d.glob("*.md")) for kind, d in _KIND_DIRS.items()}
 
 
 def read_page(kind: str, slug: str = "") -> str | None:
@@ -141,14 +148,13 @@ def find_backlinks(target_fq: str) -> list[tuple[str, str]]:
     """Find all pages that link to target_fq. Returns list of (kind, slug)."""
     ensure_dirs()
     backlinks: list[tuple[str, str]] = []
-    for kind, dir_path in (("sources", SOURCES_DIR), ("concepts", CONCEPTS_DIR)):
+    for kind, dir_path in _KIND_DIRS.items():
         for p in dir_path.glob("*.md"):
             text = p.read_text()
             for m in WIKI_LINK_RE.finditer(text):
                 if m.group(1).strip() == target_fq:
                     backlinks.append((kind, p.stem))
                     break
-    # also check index/log
     for kind, path in (("index", INDEX_PATH), ("log", LOG_PATH)):
         if path.exists():
             text = path.read_text()
