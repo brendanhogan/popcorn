@@ -82,11 +82,19 @@ cp .env.example .env                 # put your ANTHROPIC_API_KEY in
 ./run.sh                             # creates venv on first run
 ```
 
+Get an API key at [console.anthropic.com](https://console.anthropic.com/settings/keys).
+
 Opens at `http://localhost:8765` (override with `PORT=` in `.env`).
 
+**Heads up on first run:** `./run.sh` installs `sentence-transformers`,
+`scikit-learn`, `torch`, etc. for local embeddings — roughly **600MB of
+Python deps**. The first time you run `python -m app.build_wiki`, the
+embedding model itself (`all-MiniLM-L6-v2`, ~90MB) is downloaded from
+HuggingFace. Both are one-time.
+
 Defaults to `claude-sonnet-4-6` for live ingest. The bulk-import script
-hardcodes `claude-haiku-4-5` for cost reasons. Override via env or CLI
-flags.
+hardcodes `claude-haiku-4-5` for cost reasons. Override via env
+(`ANTHROPIC_MODEL=...`) or per-script CLI flags.
 
 ---
 
@@ -167,7 +175,7 @@ a blog, Twitter threads) you can import them in one shot:
 
 ## How it works
 
-Six pipelines, each readable as a short sequence of steps. Every step
+Seven pipelines, each readable as a short sequence of steps. Every step
 that involves Claude lists the file where the prompt lives, in case you
 want to edit it.
 
@@ -246,11 +254,20 @@ function in `app/build_wiki.py`. Order matters:
    journal-style recap headline + body. Reads ratings + notes as a
    retrospective. Pages land in `data/wiki/batches/{slug}.md`.
 10. **2D projection** — `app/projection.py` runs sklearn `TSNE`
-    (perplexity = `min(30, n/3)`, `random_state=42`) on all
-    embeddings, normalizes to `[-1, 1]`, saves to
+    (perplexity = `max(5, min(30, n//3))`, `random_state=42`, init=PCA)
+    on all embeddings, normalizes each axis to `[-1, 1]`, saves to
     `data/projection.json` with each point's slug for navigation.
 11. **Write `index.md`** listing meta, concepts, entities, batches, and
     sources-by-batch. Append a line to `log.md`.
+
+You can also skip parts of the build with flags:
+`--no-llm` (just write source pages), `--no-embed`, `--no-meta`,
+`--no-entities`, `--no-batches`. Useful when iterating on one piece.
+
+**Rebuild button (async):** the `/wiki` topbar **Rebuild** button calls
+`POST /api/wiki/build`, which spawns the build as a background task and
+returns immediately. The frontend polls `GET /api/wiki/build/status`
+every 2s and auto-reloads the page when the build flips back to idle.
 
 ### 4. Wiki viewer
 
@@ -357,11 +374,14 @@ data/
                         → cross-links them
 ```
 
-**Two-pass concept extraction:** entries are numbered `[1]`, `[2]`, …
-before being sent to Claude so the model can reliably emit which entries
-belong to which concept. Synthesis is constrained to refer to sources
-by short title fragments (never numeric references) so the prose reads
-naturally. See `app/build_wiki.py`.
+**Why concepts use numbered references:** in the concept-extraction
+prompt, entries are tagged `[1]`, `[2]`, … rather than by their cryptic
+8-char IDs. Models lose track of long ID lists across thousands of
+tokens; sequential integers are reliable. The schema asks Claude to
+emit `source_numbers`, which we map back to entry IDs ourselves.
+Synthesis prose is forbidden from using `[N]` references at all — it
+must refer to sources by short title fragments — so the prose reads
+naturally rather than as a citation graveyard. See `app/build_wiki.py`.
 
 `data/` is gitignored. Safe to `rm -rf data/` to start over.
 
