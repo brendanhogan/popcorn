@@ -207,7 +207,8 @@ const CONCEPT_RADIUS = 7;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 12;
 const DRAG_THRESHOLD = 5; // pixels of movement before treating mousedown as drag
-const LABEL_BASE_VB = 3; // base concept-label font size in viewBox units (at zoom=1)
+const LABEL_FONT_VB = 1.5;     // concept-label font size in viewBox units (scales with zoom)
+const LABEL_TRUNCATE = 36;     // max characters of concept title to render in the label
 
 const mapState = {
   zoom: 1,
@@ -299,9 +300,6 @@ function updateViewBox() {
   if (svg) svg.setAttribute("viewBox", viewBoxString());
   const zl = $("#map-zoom-level");
   if (zl) zl.textContent = `${mapState.zoom.toFixed(1)}×`;
-  // Keep concept labels at constant *screen* size by inverse-scaling with zoom.
-  const wrap = $("#map-svg-wrap");
-  if (wrap) wrap.style.setProperty("--label-size", `${LABEL_BASE_VB / mapState.zoom}px`);
 }
 
 function eventToSvgCoords(e) {
@@ -451,9 +449,13 @@ function drawMap(data) {
       `data-kind="concept" data-slug="${escapeAttr(p.slug)}" data-title="${escapeAttr(p.title)}"/>`
     );
     if (showConcepts) {
-      // Place label just below the concept dot; offset uses base font size
+      const labelText = p.title.length > LABEL_TRUNCATE
+        ? p.title.slice(0, LABEL_TRUNCATE - 1) + "…"
+        : p.title;
       svgParts.push(
-        `<text class="map-concept-label" x="${cx.toFixed(2)}" y="${(cy + CONCEPT_RADIUS + LABEL_BASE_VB + 1).toFixed(2)}">${escapeText(p.title)}</text>`
+        `<text class="map-concept-label" font-size="${LABEL_FONT_VB}" ` +
+        `x="${cx.toFixed(2)}" y="${(cy + CONCEPT_RADIUS + LABEL_FONT_VB + 0.5).toFixed(2)}">` +
+        `${escapeText(labelText)}</text>`
       );
     }
   }
@@ -480,7 +482,6 @@ function drawMap(data) {
   });
   $("#map-zoom-reset").addEventListener("click", () => resetZoom());
 
-  // Make sure label-size CSS var is set on first paint
   updateViewBox();
 
   // Bind interactions

@@ -367,8 +367,9 @@
 }
 .map-concept-label {
   font-family: var(--mono);
-  /* Sized in viewBox units; JS keeps --label-size constant on screen across zoom */
-  font-size: var(--label-size, 3px);
+  /* font-size is set as an SVG attribute (in user units) per <text>, so it
+     scales with the viewBox. At default zoom the SVG is ~600-1200px wide
+     against a 220-unit viewBox, so 1.5 user units ≈ 4-8 screen pixels. */
   fill: var(--muted);
   pointer-events: none;
   text-anchor: middle;
