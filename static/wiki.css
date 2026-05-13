@@ -367,7 +367,8 @@
 }
 .map-concept-label {
   font-family: var(--mono);
-  font-size: 9px;
+  /* Sized in viewBox units; JS keeps --label-size constant on screen across zoom */
+  font-size: var(--label-size, 3px);
   fill: var(--muted);
   pointer-events: none;
   text-anchor: middle;
