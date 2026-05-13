@@ -60,7 +60,9 @@ backlinks:
 - 2D t-SNE projection of every entry + concept centroid.
 - Points sized by rating (🍿), colored by date (cream→terracotta for
   time-drift).
-- Hover for title, click to open the entry/concept page.
+- **Scroll** to zoom (toward the cursor), **drag** to pan, **+/−/⌂**
+  buttons for explicit zoom control.
+- Hover for title, click a point to open its entry/concept page.
 - **Click empty space** → Claude reads the nearest entries and proposes
   2–3 specific papers/posts/ideas that would naturally live in that empty
   patch of idea-space. The "what's missing from your reading" inverse.
@@ -160,6 +162,155 @@ a blog, Twitter threads) you can import them in one shot:
    ```
 
    Or use the **Rebuild** button in the wiki UI.
+
+---
+
+## How it works
+
+Six pipelines, each readable as a short sequence of steps. Every step
+that involves Claude lists the file where the prompt lives, in case you
+want to edit it.
+
+### 1. Live ingest (one entry from a URL)
+
+When you paste URLs and click Submit:
+
+1. `POST /api/batch` creates an `Entry` record per URL with status
+   `pending` and detects the type from the URL (`arxiv.org` → `paper`,
+   `x.com`/`twitter.com` → `twitter`, everything else → `other`).
+2. A background task per entry runs `fetch_content(url, type)` in
+   `app/fetch.py`. Twitter is skipped. arXiv `/pdf/` URLs are rewritten
+   to `/abs/`. Everything else is fetched via `httpx` + `trafilatura`
+   for clean text extraction.
+3. If content was fetched, the task fires `summarize(content)` and
+   `suggest_titles(content)` in `app/llm.py` *in parallel* against
+   Sonnet 4.6. Summary is a 3–5 sentence technical compression; titles
+   are 3 candidates via structured JSON output. The fetched content is
+   sent as a `cache_control: ephemeral` system block so a follow-up
+   chat call reuses the same prefix at ~10% cost.
+4. The Entry is saved to `data/entries/{id}.json` and its ID is added
+   to the current session's `entry_ids` list. Frontend polls
+   `GET /api/entry/{id}` every 1.5s until status flips to `ready`.
+
+### 2. Screenshot / paste-text override
+
+For pages that can't be fetched (Twitter, paywalls, JS-rendered apps):
+
+1. You drop an image onto the entry card (or paste via ⌘V, or paste raw
+   text directly). For images, frontend POSTs to
+   `/api/entry/{id}/extract-image` (multipart).
+2. The image is saved at `data/images/{id}.{ext}` and `extract_text_from_image`
+   in `app/llm.py` sends it to Sonnet 4.6 with a vision prompt asking
+   for a *verbatim transcription* — no commentary, no "this image shows…".
+3. The returned text fills the textarea (you can edit it). Click
+   **Process content** → `POST /api/entry/{id}/content` saves the text
+   as `fetched_content`, sets `content_source` to `paste`/`image`, and
+   regenerates the summary and title suggestions through the same
+   pipeline as step 1.3.
+
+### 3. Wiki build (rebuild after a batch)
+
+`python -m app.build_wiki` (or click **Rebuild** in `/wiki`). Single
+function in `app/build_wiki.py`. Order matters:
+
+1. **Collect entries** across all sessions; dedup by ID.
+2. **Write source pages** — one `data/wiki/sources/{slug}.md` per entry.
+   No LLM call; pure formatting. Slug is `slugify(title)` with the
+   entry-id suffix on collisions.
+3. **Extract concepts** — one Sonnet 4.6 call with every entry's
+   `title + notes + summary`, each numbered `[1]`, `[2]`, … (cryptic IDs
+   confuse the model; sequential numbers don't). Asks for 15–25
+   recurring themes via JSON schema. Each concept declares
+   `source_numbers`; we map those back to entry IDs.
+4. **Write concept pages** at `data/wiki/concepts/{slug}.md`. Synthesis
+   prose quotes the user's notes verbatim; references sources by short
+   title fragments (the prompt forbids bracket refs in synthesis).
+5. **Rewrite source pages** to include a *Concepts* section linking
+   back to every concept they belong to.
+6. **Embed everything** — `app/embed.py` loads
+   `sentence-transformers/all-MiniLM-L6-v2` (~250MB local model, CPU
+   inference), embeds `title + notes + summary` per entry and the
+   description+synthesis per concept page, saves to
+   `data/embeddings.npz`. Takes ~3s for ~200 items.
+7. **Meta articles** — `cluster_concepts` runs sklearn
+   `AgglomerativeClustering(n_clusters=5)` on concept embeddings.
+   For each cluster with ≥2 concepts, one Sonnet call asks for a
+   *worldview* tying the concepts together. Pages land in
+   `data/wiki/meta/{slug}.md` and link to each concept (auto-backlinks
+   then appear on the concept pages).
+8. **Entity articles** — one Sonnet call over all entries asks for
+   named entities (people/labs/companies/products/papers) appearing in
+   3+ entries. For each, a synthesis of what the user has said about
+   that entity. Pages land in `data/wiki/entities/{slug}.md`.
+9. **Batch recaps** — one Sonnet call per past session, asking for a
+   journal-style recap headline + body. Reads ratings + notes as a
+   retrospective. Pages land in `data/wiki/batches/{slug}.md`.
+10. **2D projection** — `app/projection.py` runs sklearn `TSNE`
+    (perplexity = `min(30, n/3)`, `random_state=42`) on all
+    embeddings, normalizes to `[-1, 1]`, saves to
+    `data/projection.json` with each point's slug for navigation.
+11. **Write `index.md`** listing meta, concepts, entities, batches, and
+    sources-by-batch. Append a line to `log.md`.
+
+### 4. Wiki viewer
+
+A single SPA at `/wiki/*`. Server-side rendering of markdown to HTML.
+
+1. Browser navigates to `/wiki/concepts/foo` (any URL under `/wiki`).
+2. FastAPI catch-all `/wiki/{path:path}` returns the same
+   `static/wiki.html` shell. JS reads `window.location.pathname` to
+   decide what to render.
+3. For an article: `GET /api/wiki/page?path=concepts/foo` →
+   `app/wiki.py` reads the markdown, rewrites `[[wiki-link]]`s into
+   `<a href="/wiki/...">` (with `class="broken"` for unknown targets),
+   runs the `markdown` library to produce HTML, scans every other wiki
+   file for inbound links to compute backlinks. Returns
+   `{title, html, backlinks, markdown}`.
+4. The JS replaces the main article area, intercepts wiki-link clicks
+   for in-app navigation via `history.pushState`, and updates the
+   sidebar highlight.
+
+### 5. The map
+
+`/wiki/map` is rendered by the same SPA but uses a different code path:
+
+1. `GET /api/wiki/map` → `app/projection.py`'s
+   `load_or_build_projection()`. If `projection.json` is older than
+   `embeddings.npz`, it recomputes; otherwise serves the cached file.
+2. Frontend draws an SVG scatter with one `<circle>` per point.
+   - Entries: `r` by rating (3 → 11 px), `fill` by date (cream→terracotta
+     gradient), `stroke` highlighted for private entries.
+   - Concepts: larger fixed-radius circles with `<text>` labels.
+3. Pan/zoom is implemented by recomputing the SVG `viewBox` on every
+   wheel/drag event. Wheel zooms toward the cursor (math: keep the
+   SVG-coord under the cursor invariant across the zoom).
+4. Hover positions a floating tooltip via mouse coords. Click on a
+   point navigates to the corresponding wiki page.
+
+### 6. Idea discovery (click empty space on the map)
+
+1. JS detects a clean click on the map background (mousedown→mouseup
+   with < 5px of movement) and computes the projection-space
+   coordinates of the click.
+2. `POST /api/wiki/ideas` with `{x, y, k}`. Server loads the
+   projection, finds the K nearest entries and 3 nearest concept
+   centroids by Euclidean distance in 2D.
+3. A Sonnet 4.6 call gets a prompt of the form: *"The user clicked
+   (x, y). Nearest entries are [...]. Nearest concepts are [...].
+   Propose 2–3 specific papers/posts/ideas that would naturally fit
+   here but aren't currently in their list."* Structured JSON output
+   with `title`, `why`, `search_query` per idea.
+4. Frontend renders the suggestions in a panel below the map with a
+   Google-search link per idea.
+
+### 7. Per-entry chat
+
+`POST /api/entry/{id}/chat` with `{message}`. Sonnet 4.6 receives a
+two-block system: a static instruction prompt + the entry's
+`fetched_content` wrapped with `cache_control: ephemeral`. The chat
+history is the messages list. Because the article body is the same on
+every turn, the cache hit rate is ~95% — each follow-up costs roughly
+the price of the new question + the response.
 
 ---
 

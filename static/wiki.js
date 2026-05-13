@@ -200,10 +200,23 @@ function interceptLink(e) {
 
 // ---------- map ----------
 
-const MAP_VIEWBOX = 220; // viewBox is -110..110 with padding
+const MAP_VIEWBOX = 220; // viewBox is 0..220 (we map projection [-1,1] -> [PAD, VIEWBOX-PAD])
 const MAP_PAD = 8;
 const RATING_RADIUS = [3, 4, 5, 7, 9, 11]; // index = rating
 const CONCEPT_RADIUS = 7;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 12;
+const DRAG_THRESHOLD = 5; // pixels of movement before treating mousedown as drag
+
+const mapState = {
+  zoom: 1,
+  panX: 0,       // offset in viewBox units from default-centered
+  panY: 0,
+  isDragging: false,
+  dragStartClient: null,
+  dragHasMoved: false,
+  data: null,
+};
 
 function dateToOrdinal(d) {
   // "3/18/26" -> sortable number, "2/25/26" < "3/18/26"
@@ -227,6 +240,10 @@ function lerpColor(t) {
 
 async function renderMap(container) {
   document.title = "Map — popcorn wiki";
+  // reset zoom/pan when entering the map
+  mapState.zoom = 1;
+  mapState.panX = 0;
+  mapState.panY = 0;
   container.innerHTML = `
     <div class="wiki-map-wrap">
       <div class="wiki-map-header">
@@ -235,7 +252,7 @@ async function renderMap(container) {
           <span>older</span>
           <span class="legend-gradient"></span>
           <span>newer</span>
-          <span>· size = rating · click points to open · click empty space for ideas</span>
+          <span>· size = rating · scroll to zoom · drag to pan · click points to open · click empty space for ideas</span>
         </div>
       </div>
       <div class="wiki-map-controls">
@@ -261,10 +278,123 @@ async function renderMap(container) {
     return;
   }
 
+  mapState.data = data;
   drawMap(data);
+  bindMapInteractions();
 
   $("#map-toggle-concepts").addEventListener("change", () => drawMap(data));
   $("#map-toggle-time").addEventListener("change", () => drawMap(data));
+}
+
+function viewBoxString() {
+  const size = MAP_VIEWBOX / mapState.zoom;
+  const cx = MAP_VIEWBOX / 2 + mapState.panX;
+  const cy = MAP_VIEWBOX / 2 + mapState.panY;
+  return `${cx - size / 2} ${cy - size / 2} ${size} ${size}`;
+}
+
+function updateViewBox() {
+  const svg = $("#map-svg");
+  if (svg) svg.setAttribute("viewBox", viewBoxString());
+  const zl = $("#map-zoom-level");
+  if (zl) zl.textContent = `${mapState.zoom.toFixed(1)}×`;
+}
+
+function eventToSvgCoords(e) {
+  const svg = $("#map-svg");
+  if (!svg) return [0, 0];
+  const rect = svg.getBoundingClientRect();
+  const fx = (e.clientX - rect.left) / rect.width;
+  const fy = (e.clientY - rect.top) / rect.height;
+  const size = MAP_VIEWBOX / mapState.zoom;
+  const cx = MAP_VIEWBOX / 2 + mapState.panX;
+  const cy = MAP_VIEWBOX / 2 + mapState.panY;
+  return [cx - size / 2 + fx * size, cy - size / 2 + fy * size];
+}
+
+function setZoom(newZoom, pivotClientX, pivotClientY) {
+  newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+  const svg = $("#map-svg");
+  if (!svg) {
+    mapState.zoom = newZoom;
+    return;
+  }
+  // Compute the SVG-coord point under the pivot before zoom change
+  const rect = svg.getBoundingClientRect();
+  const fx = (pivotClientX - rect.left) / rect.width;
+  const fy = (pivotClientY - rect.top) / rect.height;
+  const oldSize = MAP_VIEWBOX / mapState.zoom;
+  const oldCx = MAP_VIEWBOX / 2 + mapState.panX;
+  const oldCy = MAP_VIEWBOX / 2 + mapState.panY;
+  const px = oldCx - oldSize / 2 + fx * oldSize;
+  const py = oldCy - oldSize / 2 + fy * oldSize;
+  // Adjust pan so (px, py) remains under the pivot after zoom
+  mapState.zoom = newZoom;
+  const newSize = MAP_VIEWBOX / newZoom;
+  mapState.panX = px + newSize / 2 - fx * newSize - MAP_VIEWBOX / 2;
+  mapState.panY = py + newSize / 2 - fy * newSize - MAP_VIEWBOX / 2;
+  updateViewBox();
+}
+
+function resetZoom() {
+  mapState.zoom = 1;
+  mapState.panX = 0;
+  mapState.panY = 0;
+  updateViewBox();
+}
+
+function bindMapInteractions() {
+  const wrap = $("#map-svg-wrap");
+  if (!wrap) return;
+
+  // Wheel = zoom toward cursor
+  wrap.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+    setZoom(mapState.zoom * factor, e.clientX, e.clientY);
+  }, { passive: false });
+
+  // Drag = pan; click on bg = idea discovery
+  wrap.addEventListener("mousedown", (e) => {
+    // Ignore mousedown on points so point clicks still navigate
+    if (e.target.classList && e.target.classList.contains("map-point")) return;
+    mapState.isDragging = true;
+    mapState.dragHasMoved = false;
+    mapState.dragStartClient = { x: e.clientX, y: e.clientY };
+    wrap.classList.add("dragging");
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!mapState.isDragging) return;
+    const dx = e.clientX - mapState.dragStartClient.x;
+    const dy = e.clientY - mapState.dragStartClient.y;
+    if (!mapState.dragHasMoved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    mapState.dragHasMoved = true;
+    const svg = $("#map-svg");
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const scale = (MAP_VIEWBOX / mapState.zoom) / rect.width;
+    mapState.panX -= dx * scale;
+    mapState.panY -= dy * scale;
+    mapState.dragStartClient = { x: e.clientX, y: e.clientY };
+    updateViewBox();
+  });
+
+  window.addEventListener("mouseup", (e) => {
+    if (!mapState.isDragging) return;
+    const wasMove = mapState.dragHasMoved;
+    mapState.isDragging = false;
+    wrap.classList.remove("dragging");
+    if (wasMove) return;
+    // Clean click on empty space → idea discovery
+    // Only fire if the event target was the svg bg or the wrap
+    const t = e.target;
+    if (t.classList && t.classList.contains("map-point")) return;
+    const [svgX, svgY] = eventToSvgCoords(e);
+    const projX = (svgX - MAP_PAD) / (MAP_VIEWBOX / 2 - MAP_PAD) - 1;
+    const projY = (svgY - MAP_PAD) / (MAP_VIEWBOX / 2 - MAP_PAD) - 1;
+    requestIdeas(projX, projY, e.clientX, e.clientY);
+  });
 }
 
 function drawMap(data) {
@@ -285,8 +415,8 @@ function drawMap(data) {
   ];
 
   const svgParts = [
-    `<svg viewBox="0 0 ${MAP_VIEWBOX} ${MAP_VIEWBOX}" xmlns="http://www.w3.org/2000/svg" id="map-svg">`,
-    `<rect x="0" y="0" width="${MAP_VIEWBOX}" height="${MAP_VIEWBOX}" fill="transparent" id="map-bg"/>`,
+    `<svg viewBox="${viewBoxString()}" xmlns="http://www.w3.org/2000/svg" id="map-svg" preserveAspectRatio="xMidYMid meet">`,
+    `<rect x="-1000" y="-1000" width="3000" height="3000" fill="transparent" id="map-bg"/>`,
   ];
 
   // Entries
@@ -325,8 +455,25 @@ function drawMap(data) {
 
   svgParts.push("</svg>");
   svgParts.push('<div class="map-tooltip" id="map-tooltip"></div>');
+  svgParts.push(`
+    <div class="map-zoom-controls">
+      <button id="map-zoom-in" title="Zoom in">+</button>
+      <span class="zoom-level" id="map-zoom-level">${mapState.zoom.toFixed(1)}×</span>
+      <button id="map-zoom-out" title="Zoom out">−</button>
+      <button id="map-zoom-reset" title="Reset view">⌂</button>
+    </div>
+  `);
 
   $("#map-svg-wrap").innerHTML = svgParts.join("");
+  $("#map-zoom-in").addEventListener("click", () => {
+    const r = $("#map-svg-wrap").getBoundingClientRect();
+    setZoom(mapState.zoom * 1.4, r.left + r.width / 2, r.top + r.height / 2);
+  });
+  $("#map-zoom-out").addEventListener("click", () => {
+    const r = $("#map-svg-wrap").getBoundingClientRect();
+    setZoom(mapState.zoom / 1.4, r.left + r.width / 2, r.top + r.height / 2);
+  });
+  $("#map-zoom-reset").addEventListener("click", () => resetZoom());
 
   // Bind interactions
   const svg = $("#map-svg");
@@ -361,21 +508,7 @@ function drawMap(data) {
     });
   });
 
-  // Click empty space → idea discovery
-  svg.addEventListener("click", (e) => {
-    if (e.target.tagName !== "rect" && !e.target.classList.contains("map-point") &&
-        e.target.tagName !== "svg") {
-      return;
-    }
-    if (e.target.classList.contains("map-point")) return;
-    const rect = svg.getBoundingClientRect();
-    const svgX = ((e.clientX - rect.left) / rect.width) * MAP_VIEWBOX;
-    const svgY = ((e.clientY - rect.top) / rect.height) * MAP_VIEWBOX;
-    // Convert back to projection coords
-    const px = (svgX - MAP_PAD) / (MAP_VIEWBOX / 2 - MAP_PAD) - 1;
-    const py = (svgY - MAP_PAD) / (MAP_VIEWBOX / 2 - MAP_PAD) - 1;
-    requestIdeas(px, py, svgX, svgY);
-  });
+  // Note: empty-space click + drag are handled by bindMapInteractions on the wrap.
 }
 
 function positionTooltip(tooltip, e, wrap) {
